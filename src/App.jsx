@@ -1,12 +1,7 @@
-// client/src/App.jsx
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  Send, User, Bot, Mail, FileSpreadsheet, FileText, Zap,
-  RefreshCw, Download, Search as SearchIcon, Copy, CheckCircle
-} from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, User, Bot, Mail, FileSpreadsheet, Database, FileText, Zap, RefreshCw, Download, Search, Copy, CheckCircle } from 'lucide-react';
 
-export default function App() {
-  // State
+export default function AIAgentSystem() {
   const [currentAdmin, setCurrentAdmin] = useState('Ryan');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -14,115 +9,285 @@ export default function App() {
   const [sheetData, setSheetData] = useState([]);
   const [isLoadingSheet, setIsLoadingSheet] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [gmailStatus, setGmailStatus] = useState({ connected: false, email: '' });
-  const [sendingId, setSendingId] = useState(null); // why: per-draft sending spinner
   const messagesEndRef = useRef(null);
 
-  // Config
   const admins = ['Ryan', 'Tim', 'Jeevan', 'Vishwa', 'Jason', 'Myrna', 'Julie'];
-  const SHEET_URL =
-    'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
+  const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
+  
+  // OpenAI API Key - AI ENABLED
+  const OPENAI_API_KEY = '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';
+  const USE_AI = true;
 
-  // Auto-scroll
-  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  useEffect(() => { scrollToBottom(); }, [messages]);
+  const [emailDrafts, setEmailDrafts] = useState([]);
 
-  // Robust CSV parser (handles quotes/commas/newlines)
-  const parseCSV = (csvText) => {
-    const rows = [];
-    let row = [], field = '', inQuotes = false;
-    for (let i = 0; i < csvText.length; i++) {
-      const c = csvText[i], next = csvText[i + 1];
-      if (inQuotes) {
-        if (c === '"' && next === '"') { field += '"'; i++; continue; }
-        if (c === '"') { inQuotes = false; continue; }
-        field += c;
-      } else {
-        if (c === '"') { inQuotes = true; continue; }
-        if (c === ',') { row.push(field); field = ''; continue; }
-        if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
-        if (c === '\r') { continue; }
-        field += c;
-      }
-    }
-    if (field.length || row.length) { row.push(field); rows.push(row); }
-    if (!rows.length) return { headers: [], data: [] };
-    const headers = rows[0].map(h => String(h || '').trim());
-    const data = rows
-      .slice(1)
-      .filter(r => r.some(v => String(v ?? '').trim().length))
-      .map((r, idx) => {
-        const obj = { id: idx + 1 };
-        headers.forEach((h, i) => { obj[h] = (r[i] ?? '').toString().trim(); });
-        return obj;
-      });
-    return { headers, data };
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Data loaders
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Fetch real Google Sheet data
   const fetchSheetData = async () => {
     setIsLoadingSheet(true);
     try {
-      const resp = await fetch(SHEET_URL);
-      const csvText = await resp.text();
-      const { data } = parseCSV(csvText);
+      const response = await fetch(SHEET_URL);
+      const csvText = await response.text();
+      
+      const rows = csvText.split('\n').filter(row => row.trim());
+      const headers = rows[0].split(',').map(h => h.trim());
+      
+      const data = rows.slice(1).map((row, idx) => {
+        const values = row.split(',');
+        const obj = { id: idx + 1 };
+        headers.forEach((header, i) => {
+          obj[header] = values[i]?.trim() || '';
+        });
+        return obj;
+      });
+      
       setSheetData(data);
-      return { success: true, data };
-    } catch (e) {
-      setMessages(prev => [...prev, {
-        id: Date.now(),
-        type: 'bot',
-        content: `Failed to load sheet: ${e.message}`,
-        messageType: 'text',
-        timestamp: new Date().toLocaleTimeString()
-      }]);
-      return { success: false, error: e.message };
-    } finally {
       setIsLoadingSheet(false);
+      return { success: true, data, headers };
+    } catch (error) {
+      setIsLoadingSheet(false);
+      return { success: false, error: error.message };
     }
   };
 
-  const fetchGmailStatus = async () => {
-    try {
-      const r = await fetch('/api/email/status');
-      const j = await r.json();
-      setGmailStatus(j);
-    } catch {
-      setGmailStatus({ connected: false, email: '' });
-    }
-  };
+  useEffect(() => {
+    fetchSheetData();
+  }, []);
 
-  useEffect(() => { fetchSheetData(); fetchGmailStatus(); }, []);
-
-  // Helpers
+  // Format data as HTML table
   const formatAsTable = (data, maxRows = 20) => {
-    if (!data || !data.length) return null;
+    if (!data || data.length === 0) return null;
+    
     const headers = Object.keys(data[0]).filter(k => k !== 'id');
     const displayData = data.slice(0, maxRows);
+    
     return { headers, rows: displayData, total: data.length };
   };
 
-  const processCommand = async (command) => {
-    // why: server routes natural language → intent, safer + accurate
-    const resp = await fetch('/api/ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, currentAdmin, sheetData })
-    });
-    const result = await resp.json();
-    if (result?.type === 'table' && !result?.message?.tableData?.rows) {
-      result.message = {
-        title: result?.message?.title || 'Table',
-        tableData: formatAsTable(sheetData),
-        summary: result?.message?.summary || ''
-      };
+  // Call OpenAI API
+  const callOpenAI = async (userMessage, context = '') => {
+    if (!USE_AI) return null;
+    
+    try {
+      const systemPrompt = `You are an intelligent AI assistant for a multi-admin management system. You help with:
+- Google Sheets data analysis and management
+- Email drafting and communication
+- Data searching and filtering  
+- Report generation
+- General questions and tasks
+
+Current context: ${context}
+Current admin: ${currentAdmin}
+Available sheet data: ${sheetData.length} records
+
+Respond naturally and helpfully. Be concise but thorough.`;
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4-turbo-preview',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.7,
+          max_tokens: 1000
+        })
+      });
+
+      const data = await response.json();
+      return data.choices[0]?.message?.content;
+    } catch (error) {
+      console.error('OpenAI Error:', error);
+      return null;
     }
-    return result;
   };
 
-  // Actions
+  // Enhanced command processing
+  const processCommand = async (command) => {
+    const lowerCommand = command.toLowerCase();
+
+    // Email Creation
+    if (lowerCommand.includes('create email') || lowerCommand.includes('draft email') || lowerCommand.includes('compose email') || lowerCommand.includes('write email')) {
+      const to = lowerCommand.match(/to ([a-z0-9@.\s]+)/i)?.[1] || 'recipient@example.com';
+      const subjectMatch = lowerCommand.match(/subject ([^,.\n]+)/i);
+      let subject = subjectMatch?.[1]?.trim() || 'Message from AI Agent';
+      
+      let body = `Hello,\n\n`;
+      
+      if (USE_AI) {
+        const aiBody = await callOpenAI(`Write a professional email body for: ${command}. Keep it concise and professional.`);
+        body += aiBody || 'This email was created by the AI Agent.';
+      } else {
+        body += `This email was created by ${currentAdmin} using the AI Agent.\n\n`;
+        
+        if (lowerCommand.includes('sheet') || lowerCommand.includes('data') || lowerCommand.includes('report')) {
+          body += `**Latest Data Summary:**\n\n`;
+          sheetData.slice(0, 5).forEach((row, idx) => {
+            const entries = Object.entries(row).filter(([key]) => key !== 'id');
+            body += `${idx + 1}. ${entries.map(([k, v]) => `${k}: ${v}`).join(', ')}\n`;
+          });
+        }
+      }
+      
+      body += `\n\nBest regards,\n${currentAdmin}`;
+      
+      const draft = {
+        id: Date.now(),
+        to: to.trim(),
+        subject: subject,
+        body: body,
+        createdBy: currentAdmin,
+        timestamp: new Date().toLocaleString()
+      };
+      
+      setEmailDrafts(prev => [...prev, draft]);
+      
+      return {
+        type: 'email',
+        message: { draft }
+      };
+    }
+
+    // Fetch Sheet Data - Returns table format
+    if (lowerCommand.includes('fetch') || lowerCommand.includes('show') || lowerCommand.includes('display') || lowerCommand.includes('get')) {
+      if (lowerCommand.includes('sheet') || lowerCommand.includes('data') || lowerCommand.includes('table') || lowerCommand.includes('records')) {
+        const result = await fetchSheetData();
+        
+        if (result.success) {
+          const tableData = formatAsTable(result.data);
+          return {
+            type: 'table',
+            message: {
+              title: '📊 Live Google Sheet Data',
+              tableData: tableData,
+              summary: `Successfully loaded ${result.data.length} records from your Google Sheet.`
+            }
+          };
+        }
+      }
+    }
+
+    // Search functionality
+    if (lowerCommand.includes('search') || lowerCommand.includes('find') || lowerCommand.includes('look for')) {
+      const searchTerm = lowerCommand.replace(/search|find|look for|in|sheet|data/gi, '').trim();
+      
+      if (sheetData.length === 0) await fetchSheetData();
+      
+      const results = sheetData.filter(row => {
+        return Object.values(row).some(val => 
+          String(val).toLowerCase().includes(searchTerm.toLowerCase())
+        );
+      });
+      
+      if (results.length > 0) {
+        const tableData = formatAsTable(results, 10);
+        return {
+          type: 'table',
+          message: {
+            title: `🔍 Search Results for "${searchTerm}"`,
+            tableData: tableData,
+            summary: `Found ${results.length} matching record(s)`
+          }
+        };
+      } else {
+        return {
+          type: 'text',
+          message: `🔍 No results found for "${searchTerm}" in the sheet data. Try a different search term.`
+        };
+      }
+    }
+
+    // Export data
+    if (lowerCommand.includes('export') || lowerCommand.includes('download')) {
+      const csv = [
+        Object.keys(sheetData[0] || {}).join(','),
+        ...sheetData.map(row => Object.values(row).join(','))
+      ].join('\n');
+      
+      return {
+        type: 'download',
+        message: {
+          content: csv,
+          filename: `sheet-export-${Date.now()}.csv`,
+          text: `✅ Ready to download! ${sheetData.length} records prepared as CSV file.`
+        }
+      };
+    }
+
+    // Statistics
+    if (lowerCommand.includes('count') || lowerCommand.includes('how many') || lowerCommand.includes('total') || lowerCommand.includes('stats')) {
+      const headers = sheetData.length > 0 ? Object.keys(sheetData[0]).filter(k => k !== 'id') : [];
+      
+      return {
+        type: 'text',
+        message: `📊 **Sheet Statistics**\n\n**Total Records:** ${sheetData.length}\n**Columns:** ${headers.length} (${headers.join(', ')})\n**Last Updated:** ${new Date().toLocaleString()}\n**Admin:** ${currentAdmin}\n\nUse "show sheet data" to view all records in table format.`
+      };
+    }
+
+    // Summary/Report
+    if (lowerCommand.includes('summary') || lowerCommand.includes('report') || lowerCommand.includes('analyze')) {
+      let summary = `📝 **Executive Summary**\n\n`;
+      
+      if (USE_AI && sheetData.length > 0) {
+        const dataContext = JSON.stringify(sheetData.slice(0, 10));
+        const aiSummary = await callOpenAI(`Analyze this data and provide insights: ${dataContext}. Give key findings and recommendations.`);
+        summary += aiSummary || 'Analysis in progress...';
+      } else {
+        summary += `**Data Overview:**\n`;
+        summary += `• Total Records: ${sheetData.length}\n`;
+        summary += `• Email Drafts: ${emailDrafts.length}\n`;
+        summary += `• Current Admin: ${currentAdmin}\n`;
+        summary += `• System Status: ✅ Operational\n\n`;
+        summary += `**Recommendations:**\n`;
+        summary += `✓ Review latest entries\n`;
+        summary += `✓ Follow up on pending items\n`;
+        summary += `✓ Monitor data quality\n`;
+      }
+      
+      summary += `\n\n*Generated ${new Date().toLocaleString()} by ${currentAdmin}*`;
+      
+      return { type: 'text', message: summary };
+    }
+
+    // Use AI for everything else if available
+    if (USE_AI) {
+      const context = `Sheet has ${sheetData.length} records. Email drafts: ${emailDrafts.length}.`;
+      const aiResponse = await callOpenAI(command, context);
+      
+      if (aiResponse) {
+        return { type: 'text', message: aiResponse };
+      }
+    }
+
+    // Help
+    if (lowerCommand.includes('help') || lowerCommand.includes('what can you')) {
+      return {
+        type: 'text',
+        message: `🤖 **AI Agent Commands**\n\n**📊 Data Operations:**\n• "Show sheet data" - View in table format\n• "Search [term]" - Find records\n• "Count records" - Statistics\n• "Export data" - Download CSV\n\n**📧 Email:**\n• "Create email to [email]" - Draft email\n• "Email report to [email]" - Send data report\n\n**📝 Analysis:**\n• "Generate summary" - Data insights\n• "Analyze data" - AI analysis\n\n**💬 Ask Anything:**\n${USE_AI ? 'AI is enabled - ask me anything naturally!' : 'Add OpenAI API key for natural language!'}\n\n*Type naturally - I understand context!*`
+      };
+    }
+
+    // Default: try to be helpful
+    return {
+      type: 'text',
+      message: `I received: "${command}"\n\n💡 **Try:**\n• "Show sheet data" - View table\n• "Search [term]" - Find data\n• "Create email to john@example.com" - Draft email\n• "Help" - See all commands\n\n${USE_AI ? '' : '💎 **Tip:** Add your OpenAI API key for smarter responses!'}`
+    };
+  };
+
   const handleSend = async () => {
     if (!input.trim()) return;
+
     const userMessage = {
       id: Date.now(),
       type: 'user',
@@ -130,12 +295,13 @@ export default function App() {
       admin: currentAdmin,
       timestamp: new Date().toLocaleTimeString()
     };
+
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsProcessing(true);
 
-    try {
-      const response = await processCommand(userMessage.content);
+    setTimeout(async () => {
+      const response = await processCommand(input);
       const botMessage = {
         id: Date.now() + 1,
         type: 'bot',
@@ -144,24 +310,15 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString()
       };
       setMessages(prev => [...prev, botMessage]);
-      if (response.type === 'text' && String(response.message || '').includes('Gmail id:')) {
-        fetchGmailStatus();
-      }
-    } catch (e) {
-      setMessages(prev => [...prev, {
-        id: Date.now() + 2,
-        type: 'bot',
-        content: `Error: ${e.message}`,
-        messageType: 'text',
-        timestamp: new Date().toLocaleTimeString()
-      }]);
-    } finally {
       setIsProcessing(false);
-    }
+    }, 800);
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
   };
 
   const copyToClipboard = (text) => {
@@ -174,62 +331,14 @@ export default function App() {
     const blob = new Blob([content], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    a.href = url;
+    a.download = filename;
+    a.click();
   };
 
-  const connectGmail = () => { window.location.href = '/auth/google'; };
-
-  const sendViaGmail = async (draft) => {
-    try {
-      setSendingId(draft.id);
-      const resp = await fetch('/api/email/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: draft.to,
-          subject: draft.subject,
-          body: draft.body,
-          cc: draft.cc,
-          bcc: draft.bcc
-        })
-      });
-      const j = await resp.json();
-      if (j.ok) {
-        setMessages(prev => [...prev, {
-          id: Date.now() + 3,
-          type: 'bot',
-          content: `📧 Sent! Gmail id: ${j.id}`,
-          messageType: 'text',
-          timestamp: new Date().toLocaleTimeString()
-        }]);
-      } else {
-        setMessages(prev => [...prev, {
-          id: Date.now() + 4,
-          type: 'bot',
-          content: `Send failed: ${j.error || 'unknown error'}`,
-          messageType: 'text',
-          timestamp: new Date().toLocaleTimeString()
-        }]);
-      }
-    } catch (e) {
-      setMessages(prev => [...prev, {
-        id: Date.now() + 5,
-        type: 'bot',
-        content: `Send error: ${e.message}`,
-        messageType: 'text',
-        timestamp: new Date().toLocaleTimeString()
-      }]);
-    } finally {
-      setSendingId(null);
-    }
-  };
-
-  // UI
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
         <div className="bg-white rounded-t-2xl shadow-xl p-6 border-b-2 border-indigo-300">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-3">
@@ -242,7 +351,7 @@ export default function App() {
                 </h1>
                 <p className="text-sm text-gray-600 flex items-center gap-2">
                   <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                  🤖 AI via secure server • {gmailStatus.connected ? `Gmail: ${gmailStatus.email}` : 'Gmail not connected'}
+                  {USE_AI ? '🤖 AI Enabled' : '⚡ Basic Mode'} • Connected to Google Sheets
                 </p>
               </div>
             </div>
@@ -255,19 +364,7 @@ export default function App() {
                 <RefreshCw className={`w-4 h-4 ${isLoadingSheet ? 'animate-spin' : ''}`} />
                 Sync
               </button>
-              {!gmailStatus.connected ? (
-                <button
-                  onClick={connectGmail}
-                  className="px-4 py-2 bg-red-500 text-white rounded-lg font-semibold hover:bg-red-600 shadow-md"
-                >
-                  Connect Gmail
-                </button>
-              ) : (
-                <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg font-semibold shadow-inner">
-                  Gmail Connected
-                </span>
-              )}
-              <select
+              <select 
                 value={currentAdmin}
                 onChange={(e) => setCurrentAdmin(e.target.value)}
                 className="px-4 py-2 border-2 border-indigo-300 rounded-lg font-semibold text-indigo-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-md"
@@ -280,20 +377,16 @@ export default function App() {
           </div>
         </div>
 
-        {/* Quick actions */}
         <div className="bg-white px-6 py-4 border-b border-gray-200 shadow-md">
           <div className="flex gap-2 flex-wrap">
-            <button onClick={() => setInput('Show sheet data')} className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
+            <button onClick={() => setInput('Show sheet data in table')} className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <FileSpreadsheet className="w-4 h-4" /> View Table
             </button>
             <button onClick={() => setInput('Search ')} className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
-              <SearchIcon className="w-4 h-4" /> Search
+              <Search className="w-4 h-4" /> Search
             </button>
-            <button onClick={() => setInput('Create email to someone@example.com subject Weekly Update')} className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
+            <button onClick={() => setInput('Create email to jeevansaigali@gmail.com subject Weekly Update')} className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <Mail className="w-4 h-4" /> Email
-            </button>
-            <button onClick={() => setInput('Email someone@example.com subject Weekly Update and send')} className="px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
-              <Mail className="w-4 h-4" /> Email & Send
             </button>
             <button onClick={() => setInput('Generate summary and insights')} className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <FileText className="w-4 h-4" /> Analyze
@@ -304,7 +397,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Chat area */}
         <div className="bg-white shadow-xl h-[32rem] overflow-y-auto p-6">
           {messages.length === 0 && (
             <div className="text-center text-gray-500 mt-20">
@@ -312,12 +404,12 @@ export default function App() {
               <p className="text-2xl font-bold text-gray-700">Welcome, {currentAdmin}! 👋</p>
               <p className="text-sm mt-2 text-gray-600">
                 <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                {sheetData.length} records loaded • AI Ready
+                {sheetData.length} records loaded • {USE_AI ? 'AI Ready' : 'Add API key for AI'}
               </p>
-              <p className="text-xs mt-4 text-gray-400">Try: "Show sheet data" or "Email someone@example.com subject X and send"</p>
+              <p className="text-xs mt-4 text-gray-400">Try: "Show sheet data" or "Help"</p>
             </div>
           )}
-
+          
           {messages.map(msg => (
             <div key={msg.id} className={`mb-6 flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`flex gap-3 max-w-4xl w-full ${msg.type === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -325,12 +417,15 @@ export default function App() {
                   {msg.type === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-gray-700" />}
                 </div>
                 <div className={`rounded-2xl p-5 shadow-lg flex-1 ${msg.type === 'user' ? 'bg-gradient-to-br from-indigo-600 to-purple-600 text-white' : 'bg-gray-50 text-gray-800 border border-gray-200'}`}>
-                  {msg.type === 'user' && (<div className="text-xs opacity-90 mb-2 font-semibold">{msg.admin}</div>)}
-
-                  {/* Table */}
+                  {msg.type === 'user' && (
+                    <div className="text-xs opacity-90 mb-2 font-semibold">{msg.admin}</div>
+                  )}
+                  
                   {msg.messageType === 'table' && msg.content.tableData ? (
                     <div>
-                      <h3 className="font-bold text-lg mb-3">{msg.content.title}</h3>
+                      <h3 className="font-bold text-lg mb-3 flex items-center gap-2">
+                        {msg.content.title}
+                      </h3>
                       <div className="overflow-x-auto bg-white rounded-lg shadow-inner p-4">
                         <table className="min-w-full border-collapse">
                           <thead>
@@ -365,42 +460,24 @@ export default function App() {
                       )}
                     </div>
                   ) : msg.messageType === 'email' ? (
-                    // Email draft card
                     <div className="bg-white text-gray-800 rounded-lg p-4 border-2 border-green-500">
                       <div className="flex items-center justify-between mb-3">
                         <h3 className="font-bold text-lg text-green-600 flex items-center gap-2">
                           <CheckCircle className="w-5 h-5" />
                           Email Draft Created
                         </h3>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => copyToClipboard(msg.content.draft.body)}
-                            className="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 flex items-center gap-1"
-                          >
-                            <Copy className="w-3 h-3" />
-                            {copied ? 'Copied!' : 'Copy'}
-                          </button>
-                          {gmailStatus.connected ? (
-                            <button
-                              onClick={() => sendViaGmail(msg.content.draft)}
-                              disabled={sendingId === msg.content.draft.id}
-                              className="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
-                            >
-                              {sendingId === msg.content.draft.id ? 'Sending…' : 'Send via Gmail'}
-                            </button>
-                          ) : (
-                            <button onClick={connectGmail} className="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600">
-                              Connect Gmail
-                            </button>
-                          )}
-                        </div>
+                        <button
+                          onClick={() => copyToClipboard(msg.content.draft.body)}
+                          className="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 flex items-center gap-1"
+                        >
+                          <Copy className="w-3 h-3" />
+                          {copied ? 'Copied!' : 'Copy'}
+                        </button>
                       </div>
                       <div className="space-y-2 text-sm">
                         <p><strong>To:</strong> {msg.content.draft.to}</p>
                         <p><strong>Subject:</strong> {msg.content.draft.subject}</p>
-                        {msg.content.draft.cc ? <p><strong>CC:</strong> {msg.content.draft.cc}</p> : null}
-                        {msg.content.draft.bcc ? <p><strong>BCC:</strong> {msg.content.draft.bcc}</p> : null}
-                        <p><strong>From:</strong> {gmailStatus.connected ? gmailStatus.email : 'Not connected'}</p>
+                        <p><strong>From:</strong> {msg.content.draft.createdBy}</p>
                         <div className="mt-3 p-3 bg-gray-50 rounded border">
                           <p className="text-xs text-gray-600 mb-2">Body Preview:</p>
                           <pre className="whitespace-pre-wrap text-xs">{msg.content.draft.body}</pre>
@@ -408,7 +485,6 @@ export default function App() {
                       </div>
                     </div>
                   ) : msg.messageType === 'download' ? (
-                    // Download card
                     <div>
                       <p className="mb-3">{msg.content.text}</p>
                       <button
@@ -420,12 +496,11 @@ export default function App() {
                       </button>
                     </div>
                   ) : (
-                    // Plain text
                     <div className="whitespace-pre-wrap text-sm leading-relaxed">
                       {msg.content}
                     </div>
                   )}
-
+                  
                   <div className="text-xs opacity-70 mt-3 pt-2 border-t border-opacity-20">
                     {msg.timestamp}
                   </div>
@@ -433,8 +508,7 @@ export default function App() {
               </div>
             </div>
           ))}
-
-          {/* Typing indicator */}
+          
           {isProcessing && (
             <div className="flex gap-3 mb-4">
               <div className="flex-shrink-0 w-10 h-10 rounded-full bg-gradient-to-br from-gray-300 to-gray-400 flex items-center justify-center shadow-lg">
@@ -442,9 +516,9 @@ export default function App() {
               </div>
               <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200 shadow-lg">
                 <div className="flex gap-1">
-                  <div className="w-3 h-3 rounded-full animate-bounce bg-indigo-500"></div>
-                  <div className="w-3 h-3 rounded-full animate-bounce" style={{ background: '#a855f7', animationDelay: '0.1s' }}></div>
-                  <div className="w-3 h-3 rounded-full animate-bounce" style={{ background: '#ec4899', animationDelay: '0.2s' }}></div>
+                  <div className="w-3 h-3 bg-indigo-500 rounded-full animate-bounce"></div>
+                  <div className="w-3 h-3 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                  <div className="w-3 h-3 bg-pink-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                 </div>
               </div>
             </div>
@@ -452,15 +526,14 @@ export default function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Composer */}
         <div className="bg-white rounded-b-2xl shadow-xl p-6">
           <div className="flex gap-3">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask me anything naturally…"
+              onKeyPress={handleKeyPress}
+              placeholder={USE_AI ? "Ask me anything naturally..." : "Type command: 'Show table', 'Search', 'Create email'..."}
               className="flex-1 px-5 py-4 border-2 border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg shadow-inner"
             />
             <button
@@ -474,7 +547,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Stats */}
         <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl p-5 shadow-lg text-white">
             <FileSpreadsheet className="w-8 h-8 mb-2 opacity-90" />
@@ -483,21 +555,4 @@ export default function App() {
           </div>
           <div className="bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl p-5 shadow-lg text-white">
             <Mail className="w-8 h-8 mb-2 opacity-90" />
-            <div className="text-3xl font-bold">{messages.filter(m => m.messageType === 'email').length}</div>
-            <div className="text-sm opacity-90">Email Drafts</div>
-          </div>
-          <div className="bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl p-5 shadow-lg text-white">
-            <Zap className="w-8 h-8 mb-2 opacity-90" />
-            <div className="text-3xl font-bold">{messages.length}</div>
-            <div className="text-sm opacity-90">Total Commands</div>
-          </div>
-          <div className="bg-gradient-to-br from-orange-500 to-red-500 rounded-xl p-5 shadow-lg text-white">
-            <Bot className="w-8 h-8 mb-2 opacity-90" />
-            <div className="text-3xl font-bold">{gmailStatus.connected ? 'Gmail ✓' : 'Gmail ×'}</div>
-            <div className="text-sm opacity-90">Mail Status</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+            <div className="text-
