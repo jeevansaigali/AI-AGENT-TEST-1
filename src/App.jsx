@@ -1,369 +1,12 @@
-# ===== server/package.json =====
-{
-  "name": "ai-admin-agent-pro-server",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "dev": "NODE_ENV=development node index.js"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "openai": "^4.57.0"
-  }
-}
-
-# ===== server/.env.example =====
-# Copy to .env and fill in:
-OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-# Optional:
-OPENAI_MODEL=gpt-4o-mini
-PORT=8787
-
-# ===== server/index.js =====
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import { OpenAI } from 'openai';
-
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-const classifyIntent = async (text) => {
-  const sys = `
-You convert any admin command into a strict JSON intent. Return ONLY JSON.
-
-Schema:
-{
-  "action": "show_table" | "search" | "export" | "stats" | "summary" | "email_draft" | "help" | "unknown",
-  "params": {
-    "term": string?,
-    "maxRows": number?,
-    "to": string?,
-    "subject": string?
-  }
-}
-
-Examples:
-"show sheet data" -> {"action":"show_table","params":{"maxRows":20}}
-"find acme in sheet" -> {"action":"search","params":{"term":"acme"}}
-"export data" -> {"action":"export","params":{}}
-"how many records" -> {"action":"stats","params":{}}
-"generate summary and insights" -> {"action":"summary","params":{}}
-"create email to a@b.com subject Weekly Update" -> {"action":"email_draft","params":{"to":"a@b.com","subject":"Weekly Update"}}
-"help" -> {"action":"help","params":{}}
-
-If unclear -> {"action":"unknown","params":{}}
-`;
-  const res = await openai.chat.completions.create({
-    model: MODEL,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: sys },
-      { role: 'user', content: text || '' }
-    ],
-    temperature: 0
-  });
-  try {
-    return JSON.parse(res.choices[0].message.content);
-  } catch {
-    return { action: 'unknown', params: {} };
-  }
-};
-
-const quoteCSV = (val = '') => {
-  const s = String(val ?? '');
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
-
-const toCSV = (rows) => {
-  if (!rows?.length) return '';
-  const headers = Object.keys(rows[0]);
-  const head = headers.map(quoteCSV).join(',');
-  const body = rows.map(r => headers.map(h => quoteCSV(r[h])).join(',')).join('\n');
-  return `${head}\n${body}`;
-};
-
-const headersFrom = (data) =>
-  data?.length ? Object.keys(data[0]).filter(k => k !== 'id') : [];
-
-const tablePayload = (title, headers, rows, total, summary) => ({
-  type: 'table',
-  message: {
-    title,
-    tableData: { headers, rows, total },
-    summary
-  }
-});
-
-const textPayload = (text) => ({ type: 'text', message: text });
-
-app.post('/api/ai', async (req, res) => {
-  const { command, currentAdmin = 'Admin', sheetData = [] } = req.body || {};
-  const intent = await classifyIntent(command || '');
-  const hdrs = headersFrom(sheetData);
-
-  try {
-    switch (intent.action) {
-      case 'show_table': {
-        const maxRows = Math.max(1, Math.min(intent.params?.maxRows ?? 20, 200));
-        const rows = sheetData.slice(0, maxRows);
-        return res.json(
-          tablePayload(
-            '📊 Live Google Sheet Data',
-            hdrs,
-            rows,
-            sheetData.length,
-            `Loaded ${sheetData.length} total records.`
-          )
-        );
-      }
-
-      case 'search': {
-        const term = (intent.params?.term || '').trim();
-        if (!term) return res.json(textPayload('🔎 Please provide something to search for.'));
-        const lc = term.toLowerCase();
-        const results = sheetData.filter(r =>
-          Object.values(r).some(v => String(v ?? '').toLowerCase().includes(lc))
-        );
-        if (!results.length) {
-          return res.json(textPayload(`🔍 No results found for "${term}". Try another term.`));
-        }
-        const rows = results.slice(0, 100);
-        return res.json(
-          tablePayload(
-            `🔍 Search Results for "${term}"`,
-            hdrs,
-            rows,
-            results.length,
-            `Found ${results.length} matching record(s).`
-          )
-        );
-      }
-
-      case 'export': {
-        if (!sheetData.length) return res.json(textPayload('No data to export.'));
-        const csv = toCSV(sheetData);
-        return res.json({
-          type: 'download',
-          message: {
-            content: csv,
-            filename: `sheet-export-${Date.now()}.csv`,
-            text: `✅ Ready to download! ${sheetData.length} records prepared as CSV file.`
-          }
-        });
-      }
-
-      case 'stats': {
-        const cols = hdrs.length;
-        const lines = [
-          '📊 **Sheet Statistics**',
-          '',
-          `**Total Records:** ${sheetData.length}`,
-          `**Columns:** ${cols} (${hdrs.join(', ')})`,
-          `**Admin:** ${currentAdmin}`,
-          `**Last Updated:** ${new Date().toLocaleString()}`
-        ].join('\n');
-        return res.json(textPayload(lines));
-      }
-
-      case 'summary': {
-        const preview = sheetData.slice(0, 50);
-        try {
-          const sys = `Analyze tabular business data. Output: 3-5 bullet insights + 3 short recommendations. Be concise.`;
-          const user = `Headers: ${hdrs.join(', ')}
-Sample rows (JSON): ${JSON.stringify(preview)}
-Total rows: ${sheetData.length}`;
-          const ai = await openai.chat.completions.create({
-            model: MODEL,
-            messages: [
-              { role: 'system', content: sys },
-              { role: 'user', content: user }
-            ],
-            temperature: 0.3
-          });
-          const summary = `📝 **Executive Summary**\n\n${ai.choices[0].message.content}\n\n*Generated ${new Date().toLocaleString()} by ${currentAdmin}*`;
-          return res.json(textPayload(summary));
-        } catch (err) {
-          return res.json(textPayload(`Summary unavailable: ${err.message}`));
-        }
-      }
-
-      case 'email_draft': {
-        const to = intent.params?.to?.trim() || 'recipient@example.com';
-        const subject = intent.params?.subject?.trim() || 'Message from AI Agent';
-        const preview = sheetData.slice(0, 10);
-        try {
-          const sys = `Write a brief, professional email body. Clear, actionable, no fluff.`;
-          const user = `Recipient: ${to}
-Subject: ${subject}
-Context: Admin ${currentAdmin} with reference to data.
-Headers: ${hdrs.join(', ')}
-Sample rows: ${JSON.stringify(preview)}
-Write only the body.`;
-          const ai = await openai.chat.completions.create({
-            model: MODEL,
-            messages: [
-              { role: 'system', content: sys },
-              { role: 'user', content: user }
-            ],
-            temperature: 0.4
-          });
-          const body = `${ai.choices[0].message.content}\n\nBest regards,\n${currentAdmin}`;
-          return res.json({
-            type: 'email',
-            message: {
-              draft: {
-                id: Date.now(),
-                to,
-                subject,
-                body,
-                createdBy: currentAdmin,
-                timestamp: new Date().toLocaleString()
-              }
-            }
-          });
-        } catch (err) {
-          return res.json(textPayload(`Email draft unavailable: ${err.message}`));
-        }
-      }
-
-      case 'help': {
-        const help = `🤖 **AI Agent Commands**
-
-**📊 Data**
-• "Show sheet data" — Table
-• "Search acme" — Find rows
-• "Count records" — Stats
-• "Export data" — CSV
-
-**📝 Analysis**
-• "Generate summary" — Insights & recs
-
-**📧 Email**
-• "Create email to a@b.com subject Weekly Update" — Draft
-
-**💬 Natural language**
-Ask anything about the data; I'll route it.`;
-        return res.json(textPayload(help));
-      }
-
-      default: {
-        return res.json(
-          textPayload(`I received: "${command}"\n\nTry:\n• "Show sheet data"\n• "Search {term}"\n• "Generate summary"\n• "Export data"\n• "Help"`)
-        );
-      }
-    }
-  } catch (e) {
-    return res.status(500).json(textPayload(`Server error: ${e.message}`));
-  }
-});
-
-const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => {
-  console.log(`AI server listening on http://localhost:${PORT}`);
-});
-
-# ===== client/package.json =====
-{
-  "name": "ai-admin-agent-pro-client",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview --port 5173"
-  },
-  "dependencies": {
-    "lucide-react": "^0.469.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13",
-    "vite": "^5.4.8"
-  }
-}
-
-# ===== client/vite.config.js =====
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8787',
-        changeOrigin: true
-      }
-    }
-  }
-});
-
-# ===== client/tailwind.config.js =====
-/** @type {import('tailwindcss').Config} */
-export default {
-  content: ['./index.html', './src/**/*.{js,jsx,ts,tsx}'],
-  theme: { extend: {} },
-  plugins: []
-};
-
-# ===== client/postcss.config.js =====
-export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {}
-  }
-};
-
-# ===== client/index.html =====
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Admin Agent Pro</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
-
-# ===== client/src/main.jsx =====
-import React from 'react';
-import { createRoot } from 'react-dom/client';
-import App from './App.jsx';
-import './index.css';
-
-createRoot(document.getElementById('root')).render(<App />);
-
-# ===== client/src/index.css =====
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-# ===== client/src/App.jsx =====
-import React, { useState, useRef, useEffect } from 'react';
+// client/src/App.jsx
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Send, User, Bot, Mail, FileSpreadsheet, FileText, Zap,
   RefreshCw, Download, Search as SearchIcon, Copy, CheckCircle
 } from 'lucide-react';
 
 export default function App() {
+  // State
   const [currentAdmin, setCurrentAdmin] = useState('Ryan');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -371,25 +14,25 @@ export default function App() {
   const [sheetData, setSheetData] = useState([]);
   const [isLoadingSheet, setIsLoadingSheet] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [gmailStatus, setGmailStatus] = useState({ connected: false, email: '' });
+  const [sendingId, setSendingId] = useState(null); // why: per-draft sending spinner
   const messagesEndRef = useRef(null);
 
+  // Config
   const admins = ['Ryan', 'Tim', 'Jeevan', 'Vishwa', 'Jason', 'Myrna', 'Julie'];
-  const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
+  const SHEET_URL =
+    'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
 
+  // Auto-scroll
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   useEffect(() => { scrollToBottom(); }, [messages]);
 
-  // Robust CSV parsing (why: commas/newlines/quotes in fields)
+  // Robust CSV parser (handles quotes/commas/newlines)
   const parseCSV = (csvText) => {
     const rows = [];
-    let row = [];
-    let field = '';
-    let inQuotes = false;
-
+    let row = [], field = '', inQuotes = false;
     for (let i = 0; i < csvText.length; i++) {
-      const c = csvText[i];
-      const next = csvText[i + 1];
-
+      const c = csvText[i], next = csvText[i + 1];
       if (inQuotes) {
         if (c === '"' && next === '"') { field += '"'; i++; continue; }
         if (c === '"') { inQuotes = false; continue; }
@@ -403,7 +46,6 @@ export default function App() {
       }
     }
     if (field.length || row.length) { row.push(field); rows.push(row); }
-
     if (!rows.length) return { headers: [], data: [] };
     const headers = rows[0].map(h => String(h || '').trim());
     const data = rows
@@ -417,6 +59,7 @@ export default function App() {
     return { headers, data };
   };
 
+  // Data loaders
   const fetchSheetData = async () => {
     setIsLoadingSheet(true);
     try {
@@ -439,8 +82,19 @@ export default function App() {
     }
   };
 
-  useEffect(() => { fetchSheetData(); }, []);
+  const fetchGmailStatus = async () => {
+    try {
+      const r = await fetch('/api/email/status');
+      const j = await r.json();
+      setGmailStatus(j);
+    } catch {
+      setGmailStatus({ connected: false, email: '' });
+    }
+  };
 
+  useEffect(() => { fetchSheetData(); fetchGmailStatus(); }, []);
+
+  // Helpers
   const formatAsTable = (data, maxRows = 20) => {
     if (!data || !data.length) return null;
     const headers = Object.keys(data[0]).filter(k => k !== 'id');
@@ -449,15 +103,13 @@ export default function App() {
   };
 
   const processCommand = async (command) => {
-    const body = { command, currentAdmin, sheetData };
+    // why: server routes natural language → intent, safer + accurate
     const resp = await fetch('/api/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ command, currentAdmin, sheetData })
     });
     const result = await resp.json();
-
-    // Fallback: ensure table has structure if server omitted rows
     if (result?.type === 'table' && !result?.message?.tableData?.rows) {
       result.message = {
         title: result?.message?.title || 'Table',
@@ -468,9 +120,9 @@ export default function App() {
     return result;
   };
 
+  // Actions
   const handleSend = async () => {
     if (!input.trim()) return;
-
     const userMessage = {
       id: Date.now(),
       type: 'user',
@@ -478,7 +130,6 @@ export default function App() {
       admin: currentAdmin,
       timestamp: new Date().toLocaleTimeString()
     };
-
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsProcessing(true);
@@ -493,6 +144,9 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString()
       };
       setMessages(prev => [...prev, botMessage]);
+      if (response.type === 'text' && String(response.message || '').includes('Gmail id:')) {
+        fetchGmailStatus();
+      }
     } catch (e) {
       setMessages(prev => [...prev, {
         id: Date.now() + 2,
@@ -507,10 +161,7 @@ export default function App() {
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
   const copyToClipboard = (text) => {
@@ -523,15 +174,62 @@ export default function App() {
     const blob = new Blob([content], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
+    a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
   };
 
+  const connectGmail = () => { window.location.href = '/auth/google'; };
+
+  const sendViaGmail = async (draft) => {
+    try {
+      setSendingId(draft.id);
+      const resp = await fetch('/api/email/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: draft.to,
+          subject: draft.subject,
+          body: draft.body,
+          cc: draft.cc,
+          bcc: draft.bcc
+        })
+      });
+      const j = await resp.json();
+      if (j.ok) {
+        setMessages(prev => [...prev, {
+          id: Date.now() + 3,
+          type: 'bot',
+          content: `📧 Sent! Gmail id: ${j.id}`,
+          messageType: 'text',
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+      } else {
+        setMessages(prev => [...prev, {
+          id: Date.now() + 4,
+          type: 'bot',
+          content: `Send failed: ${j.error || 'unknown error'}`,
+          messageType: 'text',
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, {
+        id: Date.now() + 5,
+        type: 'bot',
+        content: `Send error: ${e.message}`,
+        messageType: 'text',
+        timestamp: new Date().toLocaleTimeString()
+      }]);
+    } finally {
+      setSendingId(null);
+    }
+  };
+
+  // UI
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4">
       <div className="max-w-7xl mx-auto">
+        {/* Header */}
         <div className="bg-white rounded-t-2xl shadow-xl p-6 border-b-2 border-indigo-300">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-3">
@@ -544,7 +242,7 @@ export default function App() {
                 </h1>
                 <p className="text-sm text-gray-600 flex items-center gap-2">
                   <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                  🤖 AI via secure server • Connected to Google Sheets
+                  🤖 AI via secure server • {gmailStatus.connected ? `Gmail: ${gmailStatus.email}` : 'Gmail not connected'}
                 </p>
               </div>
             </div>
@@ -557,6 +255,18 @@ export default function App() {
                 <RefreshCw className={`w-4 h-4 ${isLoadingSheet ? 'animate-spin' : ''}`} />
                 Sync
               </button>
+              {!gmailStatus.connected ? (
+                <button
+                  onClick={connectGmail}
+                  className="px-4 py-2 bg-red-500 text-white rounded-lg font-semibold hover:bg-red-600 shadow-md"
+                >
+                  Connect Gmail
+                </button>
+              ) : (
+                <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg font-semibold shadow-inner">
+                  Gmail Connected
+                </span>
+              )}
               <select
                 value={currentAdmin}
                 onChange={(e) => setCurrentAdmin(e.target.value)}
@@ -570,6 +280,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Quick actions */}
         <div className="bg-white px-6 py-4 border-b border-gray-200 shadow-md">
           <div className="flex gap-2 flex-wrap">
             <button onClick={() => setInput('Show sheet data')} className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
@@ -578,8 +289,11 @@ export default function App() {
             <button onClick={() => setInput('Search ')} className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <SearchIcon className="w-4 h-4" /> Search
             </button>
-            <button onClick={() => setInput('Create email to jeevansaigali@gmail.com subject Weekly Update')} className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
+            <button onClick={() => setInput('Create email to someone@example.com subject Weekly Update')} className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <Mail className="w-4 h-4" /> Email
+            </button>
+            <button onClick={() => setInput('Email someone@example.com subject Weekly Update and send')} className="px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
+              <Mail className="w-4 h-4" /> Email & Send
             </button>
             <button onClick={() => setInput('Generate summary and insights')} className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <FileText className="w-4 h-4" /> Analyze
@@ -590,6 +304,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Chat area */}
         <div className="bg-white shadow-xl h-[32rem] overflow-y-auto p-6">
           {messages.length === 0 && (
             <div className="text-center text-gray-500 mt-20">
@@ -599,7 +314,7 @@ export default function App() {
                 <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2"></span>
                 {sheetData.length} records loaded • AI Ready
               </p>
-              <p className="text-xs mt-4 text-gray-400">Try: "Show sheet data" or "Help"</p>
+              <p className="text-xs mt-4 text-gray-400">Try: "Show sheet data" or "Email someone@example.com subject X and send"</p>
             </div>
           )}
 
@@ -610,10 +325,9 @@ export default function App() {
                   {msg.type === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-gray-700" />}
                 </div>
                 <div className={`rounded-2xl p-5 shadow-lg flex-1 ${msg.type === 'user' ? 'bg-gradient-to-br from-indigo-600 to-purple-600 text-white' : 'bg-gray-50 text-gray-800 border border-gray-200'}`}>
-                  {msg.type === 'user' && (
-                    <div className="text-xs opacity-90 mb-2 font-semibold">{msg.admin}</div>
-                  )}
+                  {msg.type === 'user' && (<div className="text-xs opacity-90 mb-2 font-semibold">{msg.admin}</div>)}
 
+                  {/* Table */}
                   {msg.messageType === 'table' && msg.content.tableData ? (
                     <div>
                       <h3 className="font-bold text-lg mb-3">{msg.content.title}</h3>
@@ -651,24 +365,42 @@ export default function App() {
                       )}
                     </div>
                   ) : msg.messageType === 'email' ? (
+                    // Email draft card
                     <div className="bg-white text-gray-800 rounded-lg p-4 border-2 border-green-500">
                       <div className="flex items-center justify-between mb-3">
                         <h3 className="font-bold text-lg text-green-600 flex items-center gap-2">
                           <CheckCircle className="w-5 h-5" />
                           Email Draft Created
                         </h3>
-                        <button
-                          onClick={() => copyToClipboard(msg.content.draft.body)}
-                          className="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 flex items-center gap-1"
-                        >
-                          <Copy className="w-3 h-3" />
-                          {copied ? 'Copied!' : 'Copy'}
-                        </button>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => copyToClipboard(msg.content.draft.body)}
+                            className="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 flex items-center gap-1"
+                          >
+                            <Copy className="w-3 h-3" />
+                            {copied ? 'Copied!' : 'Copy'}
+                          </button>
+                          {gmailStatus.connected ? (
+                            <button
+                              onClick={() => sendViaGmail(msg.content.draft)}
+                              disabled={sendingId === msg.content.draft.id}
+                              className="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                            >
+                              {sendingId === msg.content.draft.id ? 'Sending…' : 'Send via Gmail'}
+                            </button>
+                          ) : (
+                            <button onClick={connectGmail} className="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600">
+                              Connect Gmail
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <div className="space-y-2 text-sm">
                         <p><strong>To:</strong> {msg.content.draft.to}</p>
                         <p><strong>Subject:</strong> {msg.content.draft.subject}</p>
-                        <p><strong>From:</strong> {msg.content.draft.createdBy}</p>
+                        {msg.content.draft.cc ? <p><strong>CC:</strong> {msg.content.draft.cc}</p> : null}
+                        {msg.content.draft.bcc ? <p><strong>BCC:</strong> {msg.content.draft.bcc}</p> : null}
+                        <p><strong>From:</strong> {gmailStatus.connected ? gmailStatus.email : 'Not connected'}</p>
                         <div className="mt-3 p-3 bg-gray-50 rounded border">
                           <p className="text-xs text-gray-600 mb-2">Body Preview:</p>
                           <pre className="whitespace-pre-wrap text-xs">{msg.content.draft.body}</pre>
@@ -676,6 +408,7 @@ export default function App() {
                       </div>
                     </div>
                   ) : msg.messageType === 'download' ? (
+                    // Download card
                     <div>
                       <p className="mb-3">{msg.content.text}</p>
                       <button
@@ -687,6 +420,7 @@ export default function App() {
                       </button>
                     </div>
                   ) : (
+                    // Plain text
                     <div className="whitespace-pre-wrap text-sm leading-relaxed">
                       {msg.content}
                     </div>
@@ -700,6 +434,7 @@ export default function App() {
             </div>
           ))}
 
+          {/* Typing indicator */}
           {isProcessing && (
             <div className="flex gap-3 mb-4">
               <div className="flex-shrink-0 w-10 h-10 rounded-full bg-gradient-to-br from-gray-300 to-gray-400 flex items-center justify-center shadow-lg">
@@ -717,6 +452,7 @@ export default function App() {
           <div ref={messagesEndRef} />
         </div>
 
+        {/* Composer */}
         <div className="bg-white rounded-b-2xl shadow-xl p-6">
           <div className="flex gap-3">
             <input
@@ -738,6 +474,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Stats */}
         <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl p-5 shadow-lg text-white">
             <FileSpreadsheet className="w-8 h-8 mb-2 opacity-90" />
@@ -756,28 +493,11 @@ export default function App() {
           </div>
           <div className="bg-gradient-to-br from-orange-500 to-red-500 rounded-xl p-5 shadow-lg text-white">
             <Bot className="w-8 h-8 mb-2 opacity-90" />
-            <div className="text-3xl font-bold">AI+</div>
-            <div className="text-sm opacity-90">Server Secured</div>
+            <div className="text-3xl font-bold">{gmailStatus.connected ? 'Gmail ✓' : 'Gmail ×'}</div>
+            <div className="text-sm opacity-90">Mail Status</div>
           </div>
         </div>
       </div>
     </div>
   );
 }
-
-# ===== README.md =====
-# AI Admin Agent Pro
-
-## Run
-1) Server
-   - cd server
-   - cp .env.example .env  # add OPENAI_API_KEY
-   - npm i
-   - npm run dev
-
-2) Client
-   - cd client
-   - npm i
-   - npm run dev
-   - Open http://localhost:5173
-
