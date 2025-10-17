@@ -17,6 +17,7 @@ export default function AIAgentSystem() {
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
   
   const OPENAI_API_KEY = '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';
+  const USE_OPENAI = true;
   
   const GMAIL_CONFIG = {
     clientId: '1020063765005-mbbbpv12tpa9eqkh481vssp44jp8srgi.apps.googleusercontent.com',
@@ -73,46 +74,55 @@ export default function AIAgentSystem() {
     fetchSheetData();
   }, []);
 
-  // REAL GPT-4 API Call with conversation context
+  // REAL GPT-4 API Call with better error handling
   const callGPT4 = async (userMessage) => {
+    if (!USE_OPENAI) {
+      return "OpenAI is not configured. Please add your API key.";
+    }
+
     try {
       // Prepare sheet data context
       const sheetContext = sheetData.length > 0 
-        ? `\n\nCURRENT GOOGLE SHEET DATA:\n${JSON.stringify(sheetData.slice(0, 15), null, 2)}\n\nTotal Records: ${sheetData.length}\nColumns: ${sheetHeaders.join(', ')}`
+        ? `\n\nCURRENT GOOGLE SHEET DATA (First 10 records):\n${JSON.stringify(sheetData.slice(0, 10).map(row => {
+            const { _id, ...rest } = row;
+            return rest;
+          }), null, 2)}\n\nTotal Records: ${sheetData.length}\nAll Columns: ${sheetHeaders.join(', ')}`
         : '\n\nNo sheet data loaded yet.';
 
-      const systemContext = `You are an intelligent AI assistant for ${currentAdmin}, helping with business management tasks.
+      const systemPrompt = `You are an intelligent AI assistant helping ${currentAdmin} with business management.
 
-CURRENT CONTEXT:
-- Admin User: ${currentAdmin}
+CONTEXT:
+- Current User: ${currentAdmin}
 - Email: jeevansaigali@gmail.com
-- System: Multi-Admin AI Agent
-- Data Available: ${sheetData.length} records from Google Sheets
+- You have access to Google Sheets data with ${sheetData.length} records
 
-YOUR CAPABILITIES:
-1. Analyze data and provide insights
-2. Create professional emails and drafts
-3. Answer questions naturally and conversationally
-4. Help with reports, summaries, and analysis
-5. Search and filter data
-6. Provide recommendations
+${sheetContext}
 
-IMPORTANT RULES:
-- Be conversational and natural
-- When asked about data, reference the actual sheet information
-- For emails, create professional, specific content
-- If asked to analyze, provide detailed insights
-- Always be helpful and actionable
+YOUR ROLE:
+1. Analyze data and provide specific insights
+2. Create professional, detailed emails referencing actual data
+3. Answer questions using the real sheet information
+4. Be conversational and natural
+5. Always reference specific data points when relevant
 
-${sheetContext}`;
+IMPORTANT:
+- When creating emails, use actual data from the sheet
+- Be specific - mention numbers, names, and details
+- For analysis, provide actionable insights
+- Always be helpful and professional`;
 
-      const messages = [
-        { role: 'system', content: systemContext },
-        ...conversationHistory.slice(-6), // Last 3 exchanges
-        { role: 'user', content: userMessage }
-      ];
+      const payload = {
+        model: 'gpt-4',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...conversationHistory.slice(-4),
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.7,
+        max_tokens: 1500
+      };
 
-      console.log('Calling GPT-4 with:', userMessage);
+      console.log('📤 Sending to OpenAI:', userMessage.substring(0, 100));
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -120,38 +130,44 @@ ${sheetContext}`;
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${OPENAI_API_KEY}`
         },
-        body: JSON.stringify({
-          model: 'gpt-4',
-          messages: messages,
-          temperature: 0.7,
-          max_tokens: 2000,
-          presence_penalty: 0.6,
-          frequency_penalty: 0.3
-        })
+        body: JSON.stringify(payload)
       });
 
+      const responseData = await response.json();
+
       if (!response.ok) {
-        const error = await response.json();
-        console.error('OpenAI API Error:', error);
-        throw new Error(error.error?.message || 'API request failed');
+        console.error('❌ OpenAI Error:', responseData);
+        throw new Error(responseData.error?.message || `API Error: ${response.status}`);
       }
 
-      const data = await response.json();
-      const aiResponse = data.choices[0]?.message?.content;
+      const aiResponse = responseData.choices[0]?.message?.content;
       
-      console.log('GPT-4 Response:', aiResponse);
+      if (!aiResponse) {
+        throw new Error('No response from AI');
+      }
+
+      console.log('✅ AI Response received:', aiResponse.substring(0, 100));
       
       // Update conversation history
       setConversationHistory(prev => [
-        ...prev.slice(-6),
+        ...prev.slice(-4),
         { role: 'user', content: userMessage },
         { role: 'assistant', content: aiResponse }
       ]);
       
       return aiResponse;
     } catch (error) {
-      console.error('GPT-4 Error:', error);
-      return `I encountered an error: ${error.message}. The AI service may be temporarily unavailable. Please try again or rephrase your question.`;
+      console.error('💥 GPT-4 Error:', error);
+      
+      // Return helpful error message
+      if (error.message.includes('insufficient_quota')) {
+        return "⚠️ OpenAI API quota exceeded. Please check your API billing at platform.openai.com/account/billing";
+      }
+      if (error.message.includes('invalid_api_key')) {
+        return "⚠️ Invalid OpenAI API key. Please check your configuration.";
+      }
+      
+      return `⚠️ AI Error: ${error.message}\n\nFalling back to basic response. The AI service might be temporarily unavailable.`;
     }
   };
 
@@ -253,96 +269,165 @@ ${sheetContext}`;
       }
     }
 
-    // EMAIL CREATION - Use AI to understand the request
+    // EMAIL CREATION - ALWAYS use AI
     if (lowerCommand.includes('email') || lowerCommand.includes('draft') || lowerCommand.includes('compose') || lowerCommand.includes('send') || lowerCommand.includes('write')) {
+      
+      console.log('📧 Email request detected:', command);
       
       // Extract email address if provided
       const emailMatch = command.match(/to\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
       let to = emailMatch?.[1] || 'jeevansaigali@gmail.com';
       
-      // If no email found, try to extract recipient name and use default email
-      if (!emailMatch) {
-        const toMatch = command.match(/to\s+([A-Z][a-z]+)/i);
-        if (toMatch) {
-          to = 'jeevansaigali@gmail.com'; // Default email for named recipients
-        }
-      }
+      console.log('📬 Email recipient:', to);
       
-      // Create detailed prompt for GPT-4 with sheet data context
-      const sheetDataContext = sheetData.length > 0 
-        ? `\n\nAvailable data from sheet:\n${JSON.stringify(sheetData.slice(0, 10), null, 2)}\n\nTotal records: ${sheetData.length}\nColumns: ${sheetHeaders.join(', ')}`
-        : '';
+      // Prepare detailed context for AI
+      const dataContext = sheetData.length > 0 
+        ? `\n\nRELEVANT SHEET DATA:\n${JSON.stringify(sheetData.slice(0, 10).map(r => {
+            const {_id, ...data} = r;
+            return data;
+          }), null, 2)}\n\nYou have ${sheetData.length} total records with columns: ${sheetHeaders.join(', ')}`
+        : '\n\nNo sheet data available.';
       
-      const aiPrompt = `You are writing a professional business email. 
+      const emailPrompt = `USER REQUEST: "${command}"
 
-USER REQUEST: "${command}"
+${dataContext}
 
-${sheetDataContext}
+TASK: Create a professional business email based on the request above.
 
 INSTRUCTIONS:
 1. Understand what the user wants to communicate
-2. If they mention data, projects, or specific topics, reference the sheet data context
-3. Create a professional, well-structured email
-4. Make it specific and actionable
+2. If they mention specific data, projects, people, or metrics - USE THE ACTUAL SHEET DATA
+3. Be specific - use real numbers, names, and details from the data
+4. Write in a professional but friendly tone
+5. Make it actionable and clear
 
-FORMAT YOUR RESPONSE EXACTLY AS:
-SUBJECT: [write a clear, specific subject line]
+FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
+
+SUBJECT: [Write a specific, clear subject line based on the content]
 
 BODY:
-[write the complete email body - be professional, specific, and reference relevant data if mentioned]
+[Write the complete email body here. Be professional and specific. Reference actual data if the request mentions it.]
 
 Best regards,
 ${currentAdmin}
 
 NOW CREATE THE EMAIL:`;
       
-      // Call GPT-4 to generate email
-      const aiResponse = await callGPT4(aiPrompt);
+      console.log('🤖 Calling GPT-4 for email...');
       
-      // Parse AI response
-      const subjectMatch = aiResponse.match(/SUBJECT:\s*(.+?)(?=\n|$)/i);
-      const bodyMatch = aiResponse.match(/BODY:\s*([\s\S]+?)(?=Best regards|$)/i);
-      
-      let subject = subjectMatch?.[1]?.trim() || 'Update from AI Agent';
-      let body = bodyMatch?.[1]?.trim() || aiResponse;
-      
-      // Clean up the body
-      body = body.replace(/^BODY:\s*/i, '').trim();
-      
-      // Add signature
-      body += `\n\nBest regards,\n${currentAdmin}`;
-      
-      const draft = {
-        id: Date.now(),
-        to: to,
-        subject: subject,
-        body: body,
-        createdBy: currentAdmin,
-        timestamp: new Date().toLocaleString()
-      };
-      
-      setEmailDrafts(prev => [...prev, draft]);
-      
-      return {
-        type: 'email',
-        message: { draft, canSend: gmailConnected }
-      };
+      try {
+        const aiResponse = await callGPT4(emailPrompt);
+        
+        console.log('✅ AI Response:', aiResponse.substring(0, 200));
+        
+        // Parse AI response more flexibly
+        let subject = 'Update from AI Agent';
+        let body = aiResponse;
+        
+        // Try to extract subject
+        const subjectMatch = aiResponse.match(/SUBJECT:\s*(.+?)(?=\n\n|\nBODY:|\n[A-Z])/i);
+        if (subjectMatch) {
+          subject = subjectMatch[1].trim();
+        }
+        
+        // Try to extract body
+        const bodyMatch = aiResponse.match(/BODY:\s*([\s\S]+?)(?=\n\nBest regards|\nBest Regards|$)/i);
+        if (bodyMatch) {
+          body = bodyMatch[1].trim();
+        } else {
+          // If no BODY marker, use everything after SUBJECT
+          const afterSubject = aiResponse.split(/SUBJECT:.+?\n\n?/i)[1];
+          if (afterSubject) {
+            body = afterSubject.trim();
+          }
+        }
+        
+        // Clean up and add signature if not present
+        body = body.replace(/^BODY:\s*/i, '').trim();
+        if (!body.includes('Best regards')) {
+          body += `\n\nBest regards,\n${currentAdmin}`;
+        }
+        
+        const draft = {
+          id: Date.now(),
+          to: to,
+          subject: subject,
+          body: body,
+          createdBy: currentAdmin,
+          timestamp: new Date().toLocaleString()
+        };
+        
+        setEmailDrafts(prev => [...prev, draft]);
+        
+        console.log('✉️ Email draft created:', draft);
+        
+        return {
+          type: 'email',
+          message: { draft, canSend: gmailConnected }
+        };
+      } catch (error) {
+        console.error('❌ Email creation error:', error);
+        return {
+          type: 'text',
+          message: `⚠️ Failed to create email: ${error.message}\n\nPlease check your OpenAI API key and quota.`
+        };
+      }
     }
 
-    // ANALYSIS
+    // ANALYSIS - Always use AI
     if (lowerCommand.includes('analyz') || lowerCommand.includes('insight') || lowerCommand.includes('summary') || lowerCommand.includes('report')) {
-      const analysisPrompt = `Analyze the following data and provide insights:
       
-Data: ${JSON.stringify(sheetData.slice(0, 20), null, 2)}
-Total records: ${sheetData.length}
-Columns: ${sheetHeaders.join(', ')}
-
-User request: ${command}
-
-Provide specific insights, trends, and actionable recommendations.`;
+      console.log('📊 Analysis request detected');
       
-      const aiAnalysis = await callGPT4(analysisPrompt);
-      return { type: 'text', message: aiAnalysis };
+      if (sheetData.length === 0) {
+        return {
+          type: 'text',
+          message: '⚠️ No sheet data available to analyze. Please refresh the data first.'
+        };
+      }
+      
+      const analysisPrompt = `TASK: Analyze the following business data and provide actionable insights.
+
+DATA OVERVIEW:
+- Total Records: ${sheetData.length}
+- Columns: ${sheetHeaders.join(', ')}
+
+SAMPLE DATA (First 10 records):
+${JSON.stringify(sheetData.slice(0, 10).map(r => {
+  const {_id, ...data} = r;
+  return data;
+}), null, 2)}
+
+USER REQUEST: ${command}
+
+INSTRUCTIONS:
+1. Analyze the data thoroughly
+2. Identify key patterns, trends, or issues
+3. Provide specific insights with numbers
+4. Give actionable recommendations
+5. Be clear and professional
+
+Provide a comprehensive analysis with:
+- Key Findings (3-5 points)
+- Trends or Patterns
+- Recommendations
+- Action Items
+
+FORMAT: Use clear markdown with headers and bullet points.`;
+      
+      console.log('🤖 Calling GPT-4 for analysis...');
+      
+      try {
+        const aiAnalysis = await callGPT4(analysisPrompt);
+        console.log('✅ Analysis complete');
+        return { type: 'text', message: aiAnalysis };
+      } catch (error) {
+        console.error('❌ Analysis error:', error);
+        return {
+          type: 'text',
+          message: `⚠️ Analysis failed: ${error.message}\n\nBasic stats:\n- Total records: ${sheetData.length}\n- Columns: ${sheetHeaders.join(', ')}`
+        };
+      }
     }
 
     // EXPORT
