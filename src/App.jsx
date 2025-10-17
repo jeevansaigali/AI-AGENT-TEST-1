@@ -76,31 +76,43 @@ export default function AIAgentSystem() {
   // REAL GPT-4 API Call with conversation context
   const callGPT4 = async (userMessage) => {
     try {
-      const systemContext = `You are an intelligent AI assistant for a business management system.
-      
-AVAILABLE DATA:
-- Google Sheet with ${sheetData.length} records
-- Columns: ${sheetHeaders.join(', ')}
-- Current admin: ${currentAdmin}
+      // Prepare sheet data context
+      const sheetContext = sheetData.length > 0 
+        ? `\n\nCURRENT GOOGLE SHEET DATA:\n${JSON.stringify(sheetData.slice(0, 15), null, 2)}\n\nTotal Records: ${sheetData.length}\nColumns: ${sheetHeaders.join(', ')}`
+        : '\n\nNo sheet data loaded yet.';
+
+      const systemContext = `You are an intelligent AI assistant for ${currentAdmin}, helping with business management tasks.
+
+CURRENT CONTEXT:
+- Admin User: ${currentAdmin}
 - Email: jeevansaigali@gmail.com
+- System: Multi-Admin AI Agent
+- Data Available: ${sheetData.length} records from Google Sheets
 
-CAPABILITIES:
-1. Analyze data from the Google Sheet
-2. Answer ANY question naturally
-3. Help with emails, reports, and analysis
-4. Provide insights and recommendations
+YOUR CAPABILITIES:
+1. Analyze data and provide insights
+2. Create professional emails and drafts
+3. Answer questions naturally and conversationally
+4. Help with reports, summaries, and analysis
+5. Search and filter data
+6. Provide recommendations
 
-When users ask about data, reference the actual sheet data.
-Be conversational, helpful, and specific.
-If asked to analyze data, provide real insights based on the sheet information.`;
+IMPORTANT RULES:
+- Be conversational and natural
+- When asked about data, reference the actual sheet information
+- For emails, create professional, specific content
+- If asked to analyze, provide detailed insights
+- Always be helpful and actionable
 
-      const dataContext = sheetData.length > 0 ? `\n\nCurrent Sheet Data Sample (first 5 rows):\n${JSON.stringify(sheetData.slice(0, 5), null, 2)}` : '';
-      
+${sheetContext}`;
+
       const messages = [
-        { role: 'system', content: systemContext + dataContext },
-        ...conversationHistory,
+        { role: 'system', content: systemContext },
+        ...conversationHistory.slice(-6), // Last 3 exchanges
         { role: 'user', content: userMessage }
       ];
+
+      console.log('Calling GPT-4 with:', userMessage);
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -111,22 +123,27 @@ If asked to analyze data, provide real insights based on the sheet information.`
         body: JSON.stringify({
           model: 'gpt-4',
           messages: messages,
-          temperature: 0.8,
-          max_tokens: 1500
+          temperature: 0.7,
+          max_tokens: 2000,
+          presence_penalty: 0.6,
+          frequency_penalty: 0.3
         })
       });
 
       if (!response.ok) {
         const error = await response.json();
+        console.error('OpenAI API Error:', error);
         throw new Error(error.error?.message || 'API request failed');
       }
 
       const data = await response.json();
       const aiResponse = data.choices[0]?.message?.content;
       
+      console.log('GPT-4 Response:', aiResponse);
+      
       // Update conversation history
       setConversationHistory(prev => [
-        ...prev.slice(-8), // Keep last 8 messages for context
+        ...prev.slice(-6),
         { role: 'user', content: userMessage },
         { role: 'assistant', content: aiResponse }
       ]);
@@ -134,7 +151,7 @@ If asked to analyze data, provide real insights based on the sheet information.`
       return aiResponse;
     } catch (error) {
       console.error('GPT-4 Error:', error);
-      return `I apologize, but I encountered an error: ${error.message}. Please try rephrasing your question.`;
+      return `I encountered an error: ${error.message}. The AI service may be temporarily unavailable. Please try again or rephrase your question.`;
     }
   };
 
@@ -236,23 +253,64 @@ If asked to analyze data, provide real insights based on the sheet information.`
       }
     }
 
-    // EMAIL CREATION
-    if (lowerCommand.includes('email') || lowerCommand.includes('draft') || lowerCommand.includes('compose') || lowerCommand.includes('send')) {
+    // EMAIL CREATION - Use AI to understand the request
+    if (lowerCommand.includes('email') || lowerCommand.includes('draft') || lowerCommand.includes('compose') || lowerCommand.includes('send') || lowerCommand.includes('write')) {
+      
+      // Extract email address if provided
       const emailMatch = command.match(/to\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-      const to = emailMatch?.[1] || 'jeevansaigali@gmail.com';
+      let to = emailMatch?.[1] || 'jeevansaigali@gmail.com';
       
-      // Use AI to generate email
-      const aiPrompt = `Create a professional email based on this request: "${command}". 
-      Include appropriate subject line and body. Current data context: ${sheetData.length} records available.
-      Format response as: SUBJECT: [subject]\nBODY: [body]`;
+      // If no email found, try to extract recipient name and use default email
+      if (!emailMatch) {
+        const toMatch = command.match(/to\s+([A-Z][a-z]+)/i);
+        if (toMatch) {
+          to = 'jeevansaigali@gmail.com'; // Default email for named recipients
+        }
+      }
       
+      // Create detailed prompt for GPT-4 with sheet data context
+      const sheetDataContext = sheetData.length > 0 
+        ? `\n\nAvailable data from sheet:\n${JSON.stringify(sheetData.slice(0, 10), null, 2)}\n\nTotal records: ${sheetData.length}\nColumns: ${sheetHeaders.join(', ')}`
+        : '';
+      
+      const aiPrompt = `You are writing a professional business email. 
+
+USER REQUEST: "${command}"
+
+${sheetDataContext}
+
+INSTRUCTIONS:
+1. Understand what the user wants to communicate
+2. If they mention data, projects, or specific topics, reference the sheet data context
+3. Create a professional, well-structured email
+4. Make it specific and actionable
+
+FORMAT YOUR RESPONSE EXACTLY AS:
+SUBJECT: [write a clear, specific subject line]
+
+BODY:
+[write the complete email body - be professional, specific, and reference relevant data if mentioned]
+
+Best regards,
+${currentAdmin}
+
+NOW CREATE THE EMAIL:`;
+      
+      // Call GPT-4 to generate email
       const aiResponse = await callGPT4(aiPrompt);
       
-      const subjectMatch = aiResponse.match(/SUBJECT:\s*(.+?)(?:\n|BODY:)/i);
-      const bodyMatch = aiResponse.match(/BODY:\s*(.+)/is);
+      // Parse AI response
+      const subjectMatch = aiResponse.match(/SUBJECT:\s*(.+?)(?=\n|$)/i);
+      const bodyMatch = aiResponse.match(/BODY:\s*([\s\S]+?)(?=Best regards|$)/i);
       
-      const subject = subjectMatch?.[1]?.trim() || 'Update from AI Agent';
-      const body = bodyMatch?.[1]?.trim() || aiResponse;
+      let subject = subjectMatch?.[1]?.trim() || 'Update from AI Agent';
+      let body = bodyMatch?.[1]?.trim() || aiResponse;
+      
+      // Clean up the body
+      body = body.replace(/^BODY:\s*/i, '').trim();
+      
+      // Add signature
+      body += `\n\nBest regards,\n${currentAdmin}`;
       
       const draft = {
         id: Date.now(),
@@ -444,7 +502,7 @@ Provide specific insights, trends, and actionable recommendations.`;
             <button onClick={() => setInput('Analyze the data and give me insights')} className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <Zap className="w-4 h-4" /> AI Analysis
             </button>
-            <button onClick={() => setInput('Create a professional email to jeevansaigali@gmail.com summarizing key findings')} className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
+                          <button onClick={() => setInput('Create email to PI about their project ending soon based on the sheet data')} className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
               <Mail className="w-4 h-4" /> Draft Email
             </button>
             <button onClick={() => setInput('Search for')} className="px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all flex items-center gap-2">
@@ -459,15 +517,17 @@ Provide specific insights, trends, and actionable recommendations.`;
             <div className="text-center text-gray-500 mt-20">
               <Bot className="w-20 h-20 mx-auto mb-4 text-indigo-400" />
               <p className="text-2xl font-bold text-gray-700">Hi {currentAdmin}! 👋</p>
-              <p className="text-sm mt-2 text-gray-600">
-                I'm your AI assistant powered by GPT-4. Ask me anything!
+                              <p className="text-sm mt-2 text-gray-600">
+                I'm your AI assistant powered by GPT-4. Ask me anything naturally!
               </p>
-              <div className="mt-6 text-left max-w-md mx-auto space-y-2 text-sm text-gray-600">
-                <p>💬 <strong>Try asking:</strong></p>
-                <p>• "What insights can you give me from the data?"</p>
-                <p>• "Show me all records"</p>
-                <p>• "Create an email about the latest updates"</p>
-                <p>• "Search for [anything]"</p>
+              <div className="mt-6 text-left max-w-md mx-auto space-y-2 text-sm text-gray-600 bg-blue-50 p-4 rounded-lg">
+                <p className="font-bold text-indigo-600">💬 Example Requests:</p>
+                <p>• "Show me the data in a table"</p>
+                <p>• "Create an email to the PM about project delays"</p>
+                <p>• "Analyze the data and tell me what stands out"</p>
+                <p>• "Search for records related to [topic]"</p>
+                <p>• "What projects are ending soon?"</p>
+                <p>• "Draft an email about budget concerns"</p>
               </div>
             </div>
           )}
@@ -605,3 +665,39 @@ Provide specific insights, trends, and actionable recommendations.`;
             />
             <button
               onClick={handleSend}
+              disabled={!input.trim() || isProcessing}
+              className="px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-bold hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all transform hover:scale-105"
+            >
+              <Send className="w-5 h-5" />
+              Send
+            </button>
+          </div>
+        </div>
+
+        {/* Stats Cards */}
+        <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl p-5 shadow-lg text-white">
+            <FileSpreadsheet className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">{sheetData.length}</div>
+            <div className="text-sm opacity-90">Sheet Records</div>
+          </div>
+          <div className="bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl p-5 shadow-lg text-white">
+            <Mail className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">{emailDrafts.length}</div>
+            <div className="text-sm opacity-90">Email Drafts</div>
+          </div>
+          <div className="bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl p-5 shadow-lg text-white">
+            <Zap className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">{messages.length}</div>
+            <div className="text-sm opacity-90">Total Commands</div>
+          </div>
+          <div className="bg-gradient-to-br from-orange-500 to-red-500 rounded-xl p-5 shadow-lg text-white">
+            <Bot className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">GPT-4</div>
+            <div className="text-sm opacity-90">AI Enabled</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
