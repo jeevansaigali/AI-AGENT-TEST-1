@@ -16,7 +16,7 @@ export default function AIAgentSystem() {
   const admins = ['Ryan', 'Tim', 'Jeevan', 'Vishwa', 'Jason', 'Myrna', 'Julie'];
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTGqoyhQE2-8SK7aCLNtIdDXWsNwV-Cjvo6mLHeymu3RjC4CottLGZb6P9ivFVPdUDwyYcbULVms78s/pub?output=csv';
   
-  const OPENAI_API_KEY = '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';
+  const OPENAI_API_KEY = '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';
   const USE_OPENAI = true;
   
   const GMAIL_CONFIG = {
@@ -786,4 +786,5 @@ FORMAT: Use clear markdown with headers and bullet points.`;
     </div>
   );
 }
+
 
