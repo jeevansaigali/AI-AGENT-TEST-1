@@ -95,7 +95,7 @@ Respond naturally and helpfully. Be concise but thorough.`;
           'Authorization': `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify({
-          model: 'gpt-4-turbo-preview',
+          model: 'gpt-4',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage }
@@ -555,4 +555,21 @@ Respond naturally and helpfully. Be concise but thorough.`;
           </div>
           <div className="bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl p-5 shadow-lg text-white">
             <Mail className="w-8 h-8 mb-2 opacity-90" />
-            <div className="text-
+            <div className="text-3xl font-bold">{emailDrafts.length}</div>
+            <div className="text-sm opacity-90">Email Drafts</div>
+          </div>
+          <div className="bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl p-5 shadow-lg text-white">
+            <Zap className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">{messages.length}</div>
+            <div className="text-sm opacity-90">Total Commands</div>
+          </div>
+          <div className="bg-gradient-to-br from-orange-500 to-red-500 rounded-xl p-5 shadow-lg text-white">
+            <Bot className="w-8 h-8 mb-2 opacity-90" />
+            <div className="text-3xl font-bold">AI+</div>
+            <div className="text-sm opacity-90">GPT-4 Enabled</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
